@@ -1,0 +1,17 @@
+schedule_wake:
+  name: Schedule native Pi wake
+  description: Arms and verifies the Raspberry Pi RTC alarm.
+  fields:
+    retry_minutes:
+      name: Minutes until wake
+      required: true
+      selector:
+        number:
+          min: 5
+          max: 1440
+          step: 1
+          unit_of_measurement: min
+          mode: box
+cancel_wake:
+  name: Cancel native Pi wake
+  description: Cancels only an alarm owned by EcoFlow RTC.
