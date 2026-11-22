@@ -1,0 +1,228 @@
+blueprint:
+  name: EcoFlow RIVER 3 - Encerramento seguro por bateria baixa
+  description: >-
+    Versão 1.1.0. Para HAOS/Supervised. Selecionar a EcoFlow que alimenta
+    este anfitrião. O blueprint resolve as leituras no dispositivo selecionado.
+    Encerra após descarga e telemetria coerente durante dois minutos (configurável).
+    Limiar = max(20, limite mínimo de descarga + 10).
+    Dados inválidos, antigos ou ausência de comunicação bloqueiam a ação.
+    O shutdown está desarmado por defeito: validar entidades e cadência dos
+    relatórios antes de permitir o encerramento. Não testar com Executar ações.
+    O despertar periódico opcional usa a integração EcoFlow RTC e requer
+    preparação do bootloader. Não controla a saída AC.
+  domain: automation
+  source_url: https://github.com/rpmlourenco/EcoflowRTC/blob/main/blueprints/automation/ecoflow_safe_shutdown.yaml
+  homeassistant:
+    min_version: "2026.3.0"
+  input:
+    shutdown_enabled:
+      name: Permitir encerramento do anfitrião
+      description: Ativar apenas após validar esta UPS, este anfitrião e a telemetria.
+      default: false
+      selector:
+        boolean: {}
+    ups_device:
+      name: Dispositivo EcoFlow
+      description: Selecionar a EcoFlow RIVER 3 que alimenta o anfitrião.
+      default: ""
+      selector:
+        device:
+          filter:
+            - integration: ecoflow_cloud
+    battery_entity:
+      name: Bateria (compatibilidade com a versão anterior)
+      default: ""
+      visible: false
+    confirmation_seconds:
+      name: Confirmação contínua
+      description: Reinicia quando a condição deixa de ser válida ou após reload/restart.
+      default: 120
+      selector:
+        number:
+          min: 30
+          max: 600
+          step: 1
+          unit_of_measurement: s
+          mode: box
+    max_age_seconds:
+      name: Idade máxima dos relatórios
+      description: Aplicada às seis leituras de bateria e potência, usando last_reported.
+      default: 180
+      selector:
+        number:
+          min: 30
+          max: 300
+          step: 1
+          unit_of_measurement: s
+          mode: box
+    retry_enabled:
+      name: Ativar despertar periódico do Pi
+      description: Requer a integração EcoFlow RTC e o bootloader preparado.
+      default: false
+      selector:
+        boolean: {}
+    retry_minutes:
+      name: Intervalo entre tentativas de despertar
+      description: Usar 15 minutos no teste supervisionado e 30 em produção.
+      default: 15
+      selector:
+        number:
+          min: 5
+          max: 1440
+          step: 1
+          unit_of_measurement: min
+          mode: box
+
+variables: &ecoflow_shutdown_settings
+  shutdown_enabled: !input shutdown_enabled
+  ups_device: !input ups_device
+  legacy_battery: !input battery_entity
+  max_age_seconds: !input max_age_seconds
+  retry_enabled: !input retry_enabled
+trigger_variables: *ecoflow_shutdown_settings
+triggers:
+  - trigger: template
+    id: confirmed_low_battery
+    value_template: &ecoflow_safe_low_battery >-
+      {% set device = ups_device or (device_id(legacy_battery) if legacy_battery else none) %}
+      {% set entities = device_entities(device) if device else [] %}
+      {% set roles = {
+        'battery_entity': ['sensor', 'battery_level'],
+        'main_battery_entity': ['sensor', 'main_battery_level'],
+        'discharge_floor_entity': ['number', 'min_discharge_level'],
+        'ac_in_entity': ['sensor', 'ac_in_power'],
+        'ac_out_entity': ['sensor', 'ac_out_power'],
+        'total_in_entity': ['sensor', 'total_in_power'],
+        'total_out_entity': ['sensor', 'total_out_power'],
+        'status_entity': ['sensor', 'status'],
+        'charging_state_entity': ['sensor', 'battery_charging_state'],
+        'ac_enabled_entity': ['switch', 'ac_enabled']
+      } %}
+      {% set matches = namespace(groups=[]) %}
+      {% for entity in entities if entity.startswith('sensor.') and entity.endswith('_battery_level') %}
+        {% set prefix = entity[7:-13] %}
+        {% set group = namespace(values={}, complete=true) %}
+        {% for role, parts in roles.items() %}
+          {% set candidate = parts[0] ~ '.' ~ prefix ~ parts[1] %}
+          {% if candidate in entities %}
+            {% set group.values = dict(group.values, **{role: candidate}) %}
+          {% else %}
+            {% set group.complete = false %}
+          {% endif %}
+        {% endfor %}
+        {% if group.complete %}
+          {% set matches.groups = matches.groups + [group.values] %}
+        {% endif %}
+      {% endfor %}
+      {% set valid = false %}
+      {% if matches.groups | count == 1 %}
+      {% set ids = matches.groups[0] %}
+        {% set battery = states(ids.battery_entity) | float(none) %}
+        {% set main = states(ids.main_battery_entity) | float(none) %}
+        {% set floor = states(ids.discharge_floor_entity) | float(none) %}
+        {% set ac_in = states(ids.ac_in_entity) | float(none) %}
+        {% set ac_out = states(ids.ac_out_entity) | float(none) %}
+        {% set total_in = states(ids.total_in_entity) | float(none) %}
+        {% set total_out = states(ids.total_out_entity) | float(none) %}
+        {% set fresh = namespace(ok=true) %}
+        {% for entity_id in [ids.battery_entity, ids.main_battery_entity, ids.ac_in_entity,
+                             ids.ac_out_entity, ids.total_in_entity, ids.total_out_entity] %}
+          {% set entity = states[entity_id] %}
+          {% set age = as_timestamp(now()) - as_timestamp(entity.last_reported, 0)
+             if entity is defined and entity is not none else -1 %}
+          {% if not 0 <= age <= max_age_seconds | float(0) or not is_number(states(entity_id)) %}
+            {% set fresh.ok = false %}
+          {% endif %}
+        {% endfor %}
+        {% set valid = shutdown_enabled is sameas true and fresh.ok
+           and is_state(ids.status_entity, 'online')
+           and is_state(ids.charging_state_entity, 'discharging')
+           and is_state(ids.ac_enabled_entity, 'on')
+           and floor is not none and 0 <= floor <= 30
+           and battery is not none and main is not none
+           and 0 < battery <= ([20, floor + 10] | max)
+           and 0 < main <= ([20, floor + 10] | max)
+           and (battery - main) | abs <= 2
+           and ac_in is not none and 0 <= ac_in < 1
+           and total_in is not none and 0 <= total_in < 1
+           and ac_out is not none and ac_out > 1
+           and total_out is not none and total_out >= ac_out - 2 %}
+      {% endif %}
+      {{ valid != (wait_for_invalid | default(false)) }}
+    for:
+      seconds: !input confirmation_seconds
+  - trigger: homeassistant
+    event: start
+    id: retry_startup
+conditions: []
+actions:
+  - condition: trigger
+    id:
+      - confirmed_low_battery
+      - retry_startup
+  - if:
+      - condition: trigger
+        id: retry_startup
+    then:
+      - condition: template
+        value_template: "{{ retry_enabled is sameas true }}"
+      - if:
+          - condition: template
+            value_template: &rtc_available >-
+              {{ integration_entities('ecoflow_rtc') | select('is_state', 'on') | list | count > 0 }}
+        then:
+          - &cancel_rtc
+            action: ecoflow_rtc.cancel_wake
+            continue_on_error: true
+      - wait_template: *ecoflow_safe_low_battery
+        timeout: "00:02:00"
+        continue_on_timeout: false
+      - variables:
+          wait_for_invalid: true
+      - wait_for_trigger:
+          - trigger: template
+            value_template: *ecoflow_safe_low_battery
+        timeout:
+          seconds: !input confirmation_seconds
+        continue_on_timeout: true
+      - condition: template
+        value_template: "{{ not wait.completed }}"
+      - variables:
+          wait_for_invalid: false
+  - condition: template
+    value_template: *ecoflow_safe_low_battery
+  - if:
+      - condition: template
+        value_template: "{{ retry_enabled is sameas true }}"
+    then:
+      - if:
+          - condition: template
+            value_template: *rtc_available
+        then:
+          - action: ecoflow_rtc.schedule_wake
+            continue_on_error: true
+            response_variable: native_wake
+            data:
+              retry_minutes: !input retry_minutes
+        else:
+          - action: system_log.write
+            continue_on_error: true
+            data:
+              level: warning
+              logger: ecoflow_safe_shutdown
+              message: "EcoFlow RTC indisponível. O encerramento seguro prossegue sem despertar agendado."
+  - choose:
+      - conditions:
+          - condition: template
+            value_template: *ecoflow_safe_low_battery
+        sequence:
+          - action: hassio.host_shutdown
+            data: {}
+    default:
+      - condition: template
+        value_template: "{{ retry_enabled is sameas true }}"
+      - condition: template
+        value_template: *rtc_available
+      - *cancel_rtc
+mode: single
+max_exceeded: silent
