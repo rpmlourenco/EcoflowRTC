@@ -1,15 +1,15 @@
 blueprint:
   name: EcoFlow RIVER 3 - Encerramento seguro por bateria baixa
   description: >-
-    Versão 1.1.0. Para HAOS/Supervised. Selecionar a EcoFlow que alimenta
+    Versão 1.1.1. Para HAOS/Supervised. Selecionar a EcoFlow que alimenta
     este anfitrião. O blueprint resolve as leituras no dispositivo selecionado.
     Encerra após descarga e telemetria coerente durante dois minutos (configurável).
     Limiar = max(20, limite mínimo de descarga + 10).
     Dados inválidos, antigos ou ausência de comunicação bloqueiam a ação.
     O shutdown está desarmado por defeito: validar entidades e cadência dos
     relatórios antes de permitir o encerramento. Não testar com Executar ações.
-    O despertar periódico opcional usa a integração EcoFlow RTC e requer
-    preparação do bootloader. Não controla a saída AC.
+    O despertar periódico opcional usa a integração EcoFlow RTC. Confirmar
+    o despertar no próprio Pi antes de usar em produção. Não controla a saída AC.
   domain: automation
   source_url: https://github.com/rpmlourenco/EcoflowRTC/blob/main/blueprints/automation/ecoflow_safe_shutdown.yaml
   homeassistant:
@@ -57,7 +57,7 @@ blueprint:
           mode: box
     retry_enabled:
       name: Ativar despertar periódico do Pi
-      description: Requer a integração EcoFlow RTC e o bootloader preparado.
+      description: Requer a integração EcoFlow RTC e um teste de despertar neste Pi.
       default: false
       selector:
         boolean: {}

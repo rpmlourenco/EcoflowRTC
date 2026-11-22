@@ -30,10 +30,9 @@ Create one automation for the host and choose the **EcoFlow** that physically
 powers it. The blueprint resolves the telemetry on that device. If replacing
 an existing shutdown automation, disable the old one before arming the new one.
 
-Before enabling periodic wake, verify the Pi bootloader has
-`POWER_OFF_ON_HALT=1`, `WAKE_ON_GPIO=0`, and `WAIT_FOR_POWER_BUTTON` unset or
-zero. Follow the [Argon native RTC guide](https://github.com/rpmlourenco/ArgonUPS/blob/main/docs/NATIVE-RTC-WAKE.md)
-for the host preparation and supervised wake test.
+Keep the existing bootloader configuration and verify physical wake in a
+supervised test on this Pi before relying on it. An alarm readback verifies that
+the clock accepted the alarm. Physical wake must be confirmed separately.
 
 - `ecoflow_rtc.schedule_wake` arms and reads back an alarm. It takes
   `retry_minutes` from 5 to 1440 and returns the scheduled time.
